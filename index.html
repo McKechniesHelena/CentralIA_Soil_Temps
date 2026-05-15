@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Central IA 4" Soil Temperature</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<style>
+  :root {
+    --fg: #222;
+    --muted: #6a6a6a;
+    --line: #d9d9d9;
+    --bg: #fafafa;
+    --card: #ffffff;
+    --accent: #1f6feb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0; padding: 24px;
+    background: var(--bg); color: var(--fg);
+    max-width: 1200px; margin: 0 auto;
+  }
+  header { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+  h1 { font-size: 22px; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .controls { display: flex; gap: 12px; align-items: center; }
+  .controls label { font-size: 13px; color: var(--muted); }
+  .controls input, .controls button {
+    font-size: 14px; padding: 6px 10px; border: 1px solid var(--line);
+    border-radius: 6px; background: white;
+  }
+  .controls button { cursor: pointer; }
+  .controls button:hover { background: #f0f0f0; }
+  #status { font-size: 12px; color: var(--muted); margin: 10px 0; min-height: 16px; }
+  .card { background: var(--card); border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+  .stats { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 14px; }
+  .stat { font-size: 13px; color: var(--muted); }
+  .stat b { display: block; font-size: 22px; color: var(--fg); font-weight: 600; line-height: 1.1; }
+  #chart { width: 100%; height: 560px; }
+  footer { font-size: 12px; color: var(--muted); margin-top: 12px; text-align: right; }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Central Iowa 4&Prime; soil temperature</h1>
+    <div class="sub">Station BOOI4 (Boone, IA) &middot; ISU Mesonet &middot; Mar 15 &ndash; Jun 30</div>
+  </div>
+  <div class="controls">
+    <label>Year: <input type="number" id="year" min="2008" max="2099" step="1"></label>
+    <button id="reload" type="button">Reload</button>
+  </div>
+</header>
+
+<div class="card">
+  <div class="stats" id="stats"></div>
+  <div id="chart"></div>
+  <div id="status">Loading&hellip;</div>
+</div>
+
+<footer>
+  Data: <a href="https://mesonet.agron.iastate.edu/agclimate/" target="_blank">ISU Soil Moisture Network</a>
+</footer>
+
+<script>
+const STATION = 'BOOI4';
+const VARS = 'soil04tn,soil04t,soil04tx';
+const SEASON_START = { month: 3, day: 15 };
+const SEASON_END   = { month: 6, day: 30 };
+
+function apiUrl(year) {
+  const p = new URLSearchParams({
+    station: STATION, mode: 'daily',
+    year1: year, month1: SEASON_START.month, day1: SEASON_START.day,
+    year2: year, month2: SEASON_END.month,   day2: SEASON_END.day,
+    vars: VARS, format: 'comma',
+  });
+  return `https://mesonet.agron.iastate.edu/cgi-bin/request/isusm.py?${p}`;
+}
+
+function parseCsv(text) {
+  const [headerLine, ...rows] = text.trim().split('\n');
+  const headers = headerLine.split(',');
+  return rows.filter(r => r.length).map(r => {
+    const cols = r.split(',');
+    const o = {};
+    headers.forEach((h, i) => o[h] = cols[i]);
+    const min = parseFloat(o.soil04tn);
+    const avg = parseFloat(o.soil04t);
+    const max = parseFloat(o.soil04tx);
+    return {
+      date: o.valid,
+      min: isFinite(min) && min > -50 ? min : null,
+      avg: isFinite(avg) && avg > -50 ? avg : null,
+      max: isFinite(max) && max > -50 ? max : null,
+    };
+  });
+}
+
+async function fetchYear(year) {
+  const r = await fetch(apiUrl(year));
+  if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${year}`);
+  return parseCsv(await r.text());
+}
+
+function mmdd(iso) { return iso.slice(5); }
+
+function computeHistAggregate(histResults) {
+  const buckets = new Map();
+  for (const rows of histResults) {
+    for (const row of rows) {
+      if (row.avg === null) continue;
+      const k = mmdd(row.date);
+      if (!buckets.has(k)) buckets.set(k, []);
+      buckets.get(k).push(row.avg);
+    }
+  }
+  return Array.from(buckets.keys()).sort().map(k => {
+    const vs = buckets.get(k);
+    return {
+      mmdd: k,
+      avg: vs.reduce((a,b)=>a+b, 0) / vs.length,
+      min: Math.min(...vs),
+      max: Math.max(...vs),
+      n: vs.length,
+    };
+  });
+}
+
+function gddAccum(rows) {
+  let acc = 0;
+  return rows.map(r => {
+    if (r.avg !== null && r.avg > 50) acc += (r.avg - 50);
+    return acc;
+  });
+}
+
+function renderStats(year, current, histStats) {
+  const lastWithData = [...current].reverse().find(r => r.avg !== null);
+  if (!lastWithData) {
+    document.getElementById('stats').innerHTML =
+      `<div class="stat">No ${year} data yet.</div>`;
+    return;
+  }
+  const histMatch = histStats.find(s => s.mmdd === mmdd(lastWithData.date));
+  const cumCurrent = gddAccum(current);
+  const cumHistByMmdd = new Map();
+  let acc = 0;
+  for (const s of histStats) {
+    if (s.avg > 50) acc += (s.avg - 50);
+    cumHistByMmdd.set(s.mmdd, acc);
+  }
+  const lastIdx = current.indexOf(lastWithData);
+  const gddNow = cumCurrent[lastIdx];
+  const gddAvg = cumHistByMmdd.get(mmdd(lastWithData.date)) ?? null;
+  const delta = histMatch ? (lastWithData.avg - histMatch.avg) : null;
+  const deltaTxt = delta === null ? '' :
+    `<span style="color:${delta >= 0 ? '#0a7d24':'#b03030'}">${delta>=0?'+':''}${delta.toFixed(1)}&deg;F vs 8-yr avg</span>`;
+  const fmtDate = new Date(lastWithData.date + 'T00:00:00').toLocaleDateString(undefined, {month:'short', day:'numeric'});
+  document.getElementById('stats').innerHTML = `
+    <div class="stat">Latest 4&Prime; avg<br><b>${lastWithData.avg.toFixed(1)}&deg;F</b><span style="font-size:12px"> on ${fmtDate}</span></div>
+    <div class="stat">vs 8-year average<br><b>${deltaTxt}</b></div>
+    <div class="stat">Soil GDD since Mar 15<br><b>${gddNow.toFixed(0)}</b>${gddAvg!==null?`<span style="font-size:12px"> &middot; 8-yr avg ${gddAvg.toFixed(0)}</span>`:''}</div>
+  `;
+}
+
+function setStatus(msg) { document.getElementById('status').textContent = msg; }
+
+async function render(year, histStart, histEnd) {
+  setStatus(`Fetching ${year} and ${histStart}–${histEnd} from ISU Mesonet…`);
+
+  const histYears = [];
+  for (let y = histStart; y <= histEnd; y++) histYears.push(y);
+
+  let current, histResults;
+  try {
+    [current, ...histResults] = await Promise.all([
+      fetchYear(year),
+      ...histYears.map(fetchYear),
+    ]);
+  } catch (e) {
+    setStatus(`Error loading data: ${e.message}`);
+    console.error(e);
+    return;
+  }
+
+  const histStats = computeHistAggregate(histResults);
+
+  const xCurrent = current.map(r => r.date);
+  const yCurrent = current.map(r => r.avg);
+  const gddCurrent = gddAccum(current);
+  // Mask GDD after the last day we actually have data, so it doesn't flatline
+  const lastDataIdx = (() => {
+    for (let i = current.length - 1; i >= 0; i--) if (current[i].avg !== null) return i;
+    return -1;
+  })();
+  const gddCurrentMasked = gddCurrent.map((v, i) => i <= lastDataIdx ? v : null);
+
+  const yearStr = String(year);
+  const xHist  = histStats.map(s => `${yearStr}-${s.mmdd}`);
+  const yAvg   = histStats.map(s => s.avg);
+  const yMin   = histStats.map(s => s.min);
+  const yMax   = histStats.map(s => s.max);
+  let histGddAcc = 0;
+  const gddHist = histStats.map(s => {
+    if (s.avg > 50) histGddAcc += (s.avg - 50);
+    return histGddAcc;
+  });
+
+  const traces = [
+    { x: xHist, y: yMax, type:'scatter', mode:'lines',
+      line:{width:0}, showlegend:false, hoverinfo:'skip' },
+    { x: xHist, y: yMin, type:'scatter', mode:'lines',
+      line:{width:0}, fill:'tonexty', fillcolor:'rgba(140,140,140,0.18)',
+      name: `${histStart}–${histEnd} range`, hoverinfo:'skip' },
+    { x: xHist, y: yAvg, type:'scatter', mode:'lines',
+      line:{color:'#666', width:2, dash:'dash'},
+      name: `${histStart}–${histEnd} avg` },
+    { x: xCurrent, y: yCurrent, type:'scatter', mode:'lines+markers',
+      line:{color:'#1f6feb', width:3}, marker:{size:4},
+      name: `${year}`, connectgaps:false },
+    { x: [xHist[0], xHist[xHist.length-1]], y: [50, 50],
+      type:'scatter', mode:'lines',
+      line:{color:'#c0392b', width:1.5, dash:'dot'},
+      name: '50°F threshold', hoverinfo:'skip' },
+    { x: xHist, y: gddHist, type:'scatter', mode:'lines',
+      line:{color:'#b07000', width:2, dash:'dash'},
+      name: `${histStart}–${histEnd} GDD`, yaxis: 'y2' },
+    { x: xCurrent, y: gddCurrentMasked, type:'scatter', mode:'lines',
+      line:{color:'#e08e00', width:3},
+      name: `${year} GDD`, yaxis: 'y2', connectgaps:false },
+  ];
+
+  const layout = {
+    xaxis: { tickformat:'%b %d', type:'date', showgrid:false },
+    yaxis: { title:'Soil temperature (°F)', gridcolor:'#eee', zeroline:false },
+    yaxis2: {
+      title: 'Accumulated Soil GDD (base 50°F)',
+      overlaying: 'y', side: 'right',
+      gridcolor: 'rgba(0,0,0,0)', zeroline: false,
+      titlefont: { color: '#b07000' }, tickfont: { color: '#b07000' },
+    },
+    legend: { orientation:'h', y:-0.18 },
+    margin: { t: 20, r: 60, b: 70, l: 55 },
+    hovermode: 'x unified',
+    paper_bgcolor: 'white',
+    plot_bgcolor: 'white',
+  };
+
+  Plotly.newPlot('chart', traces, layout, { responsive:true, displaylogo:false });
+  renderStats(year, current, histStats);
+  setStatus(`Loaded ${new Date().toLocaleString()} · historical window ${histStart}–${histEnd}`);
+}
+
+function defaultYear() {
+  const now = new Date();
+  const yr = now.getFullYear();
+  return now.getMonth() < 2 ? yr - 1 : yr;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const yr = defaultYear();
+  const yEl = document.getElementById('year');
+  yEl.value = yr;
+  const histEnd = yr - 1;
+  const histStart = histEnd - 7;
+
+  const go = () => {
+    const y = parseInt(yEl.value, 10);
+    if (!isFinite(y)) return;
+    render(y, y - 8, y - 1);
+  };
+
+  document.getElementById('reload').addEventListener('click', go);
+  yEl.addEventListener('change', go);
+  render(yr, histStart, histEnd);
+});
+</script>
+</body>
+</html>
