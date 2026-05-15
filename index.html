@@ -137,7 +137,7 @@ function gddAccum(rows) {
   });
 }
 
-function renderStats(year, current, histStats) {
+function renderStats(year, current, histStats, histLen) {
   const lastWithData = [...current].reverse().find(r => r.avg !== null);
   if (!lastWithData) {
     document.getElementById('stats').innerHTML =
@@ -157,12 +157,12 @@ function renderStats(year, current, histStats) {
   const gddAvg = cumHistByMmdd.get(mmdd(lastWithData.date)) ?? null;
   const delta = histMatch ? (lastWithData.avg - histMatch.avg) : null;
   const deltaTxt = delta === null ? '' :
-    `<span style="color:${delta >= 0 ? '#0a7d24':'#b03030'}">${delta>=0?'+':''}${delta.toFixed(1)}&deg;F vs 8-yr avg</span>`;
+    `<span style="color:${delta >= 0 ? '#0a7d24':'#b03030'}">${delta>=0?'+':''}${delta.toFixed(1)}&deg;F vs ${histLen}-yr avg</span>`;
   const fmtDate = new Date(lastWithData.date + 'T00:00:00').toLocaleDateString(undefined, {month:'short', day:'numeric'});
   document.getElementById('stats').innerHTML = `
     <div class="stat">Latest 4&Prime; avg<br><b>${lastWithData.avg.toFixed(1)}&deg;F</b><span style="font-size:12px"> on ${fmtDate}</span></div>
-    <div class="stat">vs 8-year average<br><b>${deltaTxt}</b></div>
-    <div class="stat">Soil GDD since Mar 15<br><b>${gddNow.toFixed(0)}</b>${gddAvg!==null?`<span style="font-size:12px"> &middot; 8-yr avg ${gddAvg.toFixed(0)}</span>`:''}</div>
+    <div class="stat">vs ${histLen}-year average<br><b>${deltaTxt}</b></div>
+    <div class="stat">Soil GDD since Mar 15<br><b>${gddNow.toFixed(0)}</b>${gddAvg!==null?`<span style="font-size:12px"> &middot; ${histLen}-yr avg ${gddAvg.toFixed(0)}</span>`:''}</div>
   `;
 }
 
@@ -250,8 +250,9 @@ async function render(year, histStart, histEnd) {
   };
 
   Plotly.newPlot('chart', traces, layout, { responsive:true, displaylogo:false });
-  renderStats(year, current, histStats);
-  setStatus(`Loaded ${new Date().toLocaleString()} · historical window ${histStart}–${histEnd}`);
+  const histLen = histEnd - histStart + 1;
+  renderStats(year, current, histStats, histLen);
+  setStatus(`Loaded ${new Date().toLocaleString()} · historical window ${histStart}–${histEnd} (${histLen} years)`);
 }
 
 function defaultYear() {
@@ -264,13 +265,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const yr = defaultYear();
   const yEl = document.getElementById('year');
   yEl.value = yr;
+  const HIST_WINDOW = 10;
   const histEnd = yr - 1;
-  const histStart = histEnd - 7;
+  const histStart = histEnd - (HIST_WINDOW - 1);
 
   const go = () => {
     const y = parseInt(yEl.value, 10);
     if (!isFinite(y)) return;
-    render(y, y - 8, y - 1);
+    render(y, y - HIST_WINDOW, y - 1);
   };
 
   document.getElementById('reload').addEventListener('click', go);
